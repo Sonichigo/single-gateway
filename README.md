@@ -97,3 +97,9 @@ Tested with agentgateway v1.4.0-alpha.1, `@modelcontextprotocol/sdk` 1.x, Node.j
 ## License
 
 Apache-2.0
+
+## References
+
+- https://youtu.be/hOmhM0oZPa8?si=7TUDGr8PN3wbFebv
+- https://www.harness.io/blog/zero-downtime-database-migrations-safe-schema-changes
+- https://github.com/Sonichigo/blastshield
