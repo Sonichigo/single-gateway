@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# One front door for every agent.
+#
+# Goose and Kimchi both connect to http://localhost:3000/mcp
+# The gateway then fans out to the real MCP servers below.
+# Add a new target here and every agent gets the new tools.
+# Remove one and every agent loses access at the same time.
+
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              cors:
+                allowOrigins:
+                  - "*"
+                allowHeaders:
+                  - mcp-protocol-version
+                  - content-type
+                  - cache-control
+                  - mcp-session-id
+                exposeHeaders:
+                  - "Mcp-Session-Id"
+            backends:
+              - mcp:
+                  targets:
+                    # Our shared team-notes server (Streamable HTTP)
+                    - name: team-notes
+                      mcp:
+                        host: http://localhost:8081/mcp
+
+                    # Optional: uncomment to also expose the sample
+                    # "everything" server through the same door.
+                    # - name: everything
+                    #   stdio:
+                    #     cmd: npx
+                    #     args: ["@modelcontextprotocol/server-everything"]

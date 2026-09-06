@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# Optional second gateway process: an LLM front door.
+#
+# Goose can point its OpenAI provider at http://localhost:4000
+# instead of api.openai.com. The gateway holds the API key,
+# writes an access log for every model call, and can apply
+# rate limits. The agent config never sees the real key.
+#
+# Run it as a second process:
+#   export OPENAI_API_KEY='<your-key>'
+#   agentgateway -f gateway/llm.yaml
+
+llm:
+  port: 4000
+  models:
+    - name: "*"
+      provider: openAI
+      params:
+        apiKey: "$OPENAI_API_KEY"
