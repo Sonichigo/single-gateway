@@ -5,8 +5,10 @@
 #
 # Agents only ever see the two Service names. They never see the key.
 #
-# Before you apply this, the pipeline replaces __NOTES_IMAGE__ with the image
-# that Stage 1 pushed (path and tag) and __LLM_MODEL__ with the model name.
+# Before you apply this, the pipeline replaces __SOURCE_REPO__ with your GitHub
+# repo (owner/name, public) and __LLM_MODEL__ with the model name.
+# There is no custom image. The notes pod clones the repo and builds the server
+# in an init container, then runs it from a stock Node image.
 # The secret llm-key is created by the pipeline from a secret input.
 
 apiVersion: v1
@@ -58,6 +60,23 @@ spec:
       labels:
         app: gateway-mcp
     spec:
+      initContainers:
+        - name: build-notes
+          image: node:22-alpine
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              apk add --no-cache git > /dev/null
+              git clone --depth 1 https://github.com/__SOURCE_REPO__.git /src
+              cd /src/mcp-server
+              npm install --silent
+              npm run build --silent
+              npm prune --omit=dev --silent
+              cp -r /src/mcp-server/. /app/
+          volumeMounts:
+            - name: app
+              mountPath: /app
       containers:
         - name: agentgateway
           image: ghcr.io/agentgateway/agentgateway:v1.7.0
@@ -72,8 +91,14 @@ spec:
             - name: config
               mountPath: /config
         - name: team-notes
-          image: __NOTES_IMAGE__
-          imagePullPolicy: Always
+          image: node:22-alpine
+          workingDir: /app
+          command: ["node", "dist/index.js"]
+          env:
+            - name: PORT
+              value: "8081"
+            - name: NOTES_FILE
+              value: /data/notes.json
           ports:
             - containerPort: 8081
           readinessProbe:
@@ -81,12 +106,16 @@ spec:
             initialDelaySeconds: 2
             periodSeconds: 3
           volumeMounts:
+            - name: app
+              mountPath: /app
             - name: data
               mountPath: /data
       volumes:
         - name: config
           configMap:
             name: gateway-config
+        - name: app
+          emptyDir: {}
         - name: data
           emptyDir: {}
 ---
