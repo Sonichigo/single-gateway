@@ -1,0 +1,154 @@
+# The agent platform for one pipeline run.
+#
+#   gateway-mcp  pod: agentgateway (:3000) + team-notes (:8081, same pod)
+#   gateway-llm  pod: agentgateway (:4000), holds the real model key
+#
+# Agents only ever see the two Service names. They never see the key.
+#
+# Before you apply this, the pipeline replaces __NOTES_IMAGE__ with the image
+# that Stage 1 pushed (path and tag) and __LLM_MODEL__ with the model name.
+# The secret llm-key is created by the pipeline from a secret input.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-ci
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: agent-ci
+data:
+  mcp.yaml: |
+    # yaml-language-server: $schema=https://agentgateway.dev/schema/config
+    binds:
+      - port: 3000
+        listeners:
+          - routes:
+              - backends:
+                  - mcp:
+                      targets:
+                        - name: team-notes
+                          mcp:
+                            host: http://localhost:8081/mcp
+  llm.yaml: |
+    # yaml-language-server: $schema=https://agentgateway.dev/schema/config
+    llm:
+      port: 4000
+      models:
+        - name: "*"
+          provider: gemini
+          params:
+            model: __LLM_MODEL__
+            apiKey: "$LLM_API_KEY"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-mcp
+  namespace: agent-ci
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway-mcp
+  template:
+    metadata:
+      labels:
+        app: gateway-mcp
+    spec:
+      containers:
+        - name: agentgateway
+          image: ghcr.io/agentgateway/agentgateway:v1.7.0
+          args: ["-f", "/config/mcp.yaml"]
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            tcpSocket: { port: 3000 }
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          volumeMounts:
+            - name: config
+              mountPath: /config
+        - name: team-notes
+          image: __NOTES_IMAGE__
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8081
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: gateway-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-mcp
+  namespace: agent-ci
+spec:
+  selector:
+    app: gateway-mcp
+  ports:
+    - port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-llm
+  namespace: agent-ci
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway-llm
+  template:
+    metadata:
+      labels:
+        app: gateway-llm
+    spec:
+      containers:
+        - name: agentgateway
+          image: ghcr.io/agentgateway/agentgateway:v1.7.0
+          args: ["-f", "/config/llm.yaml"]
+          ports:
+            - containerPort: 4000
+          env:
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-key
+                  key: LLM_API_KEY
+          readinessProbe:
+            tcpSocket: { port: 4000 }
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config
+          configMap:
+            name: gateway-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-llm
+  namespace: agent-ci
+spec:
+  selector:
+    app: gateway-llm
+  ports:
+    - port: 4000
+      targetPort: 4000

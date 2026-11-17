@@ -50,7 +50,7 @@ Start the second gateway process with `gateway/llm.yaml` (see the root README). 
 
 ```bash
 export OPENAI_HOST=http://localhost:4000
-goose configure   # pick OpenAI as provider; any placeholder key works, the gateway holds the real one
+goose configure   # pick OpenAI as provider; any placeholder key works, the gateway holds the real one and picks the real model (Gemini, OpenAI, or Azure)
 ```
 
 Now every model call from Goose also passes through one place with logs and limits.

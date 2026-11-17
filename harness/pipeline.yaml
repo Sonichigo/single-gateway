@@ -1,0 +1,264 @@
+pipeline:
+  id: agents_in_cicd
+  name: Agents in CICD
+  description: Goose reviews a change, Kimchi adds a test plan, and both talk through one agentgateway. A gate decides if the release goes on.
+  inputs:
+    target_repo:
+      type: string
+      description: GitHub repo the agents review (owner/name)
+      default: Sonichigo/inventory
+    notes_image:
+      type: string
+      description: Registry path for the team-notes image. Stage 1 builds and pushes it. Use your own path.
+      default: sonichigo/team-notes-mcp
+    notes_tag:
+      type: string
+      description: Image tag for the team-notes MCP server
+      default: latest
+    llm_model:
+      type: string
+      description: Model the gateway sends to the provider. Change this when a model is retired.
+      default: gemini-3.5-flash-lite
+    llm_api_key:
+      type: secret
+      description: Model key (Gemini, OpenAI or Azure). It goes into the gateway only. Agents never see it.
+    kimchi_api_key:
+      type: secret
+      description: Key for Kimchi
+  stages:
+    # -----------------------------------------------------------------
+    # Stage 1 (CI): build the one image this demo needs.
+    # -----------------------------------------------------------------
+    - id: build
+      name: Build
+      runtime: cloud
+      steps:
+        - id: clone_source
+          name: Clone Source
+          clone:
+            connector: animesh_gh
+            repo: Sonichigo/one-gateway-many-agents
+            ref:
+              type: branch
+              name: main
+
+        - id: build_notes_image
+          name: Build team-notes image
+          uses: buildAndPushToDocker@1.0.0
+          with:
+            connector: animesh_dockerhub
+            repo: ${{ inputs.notes_image }}
+            tags:
+              - ${{ inputs.notes_tag }}
+
+    # -----------------------------------------------------------------
+    # Stage 2 (CD): put the two gateways and team-notes on Kubernetes.
+    # The model key goes into a Kubernetes secret that only the LLM
+    # gateway pod can read.
+    # -----------------------------------------------------------------
+    - id: deploy_platform
+      name: Deploy Agent Platform
+      runtime:
+        kubernetes: {}
+        delegate:
+          - delegate-animesh
+      service:
+        items:
+          - id: agent_platform_service
+      environment:
+        items:
+          - id: agent_platform_env
+            deploy-to: agent_platform_infra
+      steps:
+        - id: clone_manifests
+          name: Clone Manifests
+          clone:
+            connector: animesh_gh
+            repo: Sonichigo/one-gateway-many-agents
+            ref:
+              type: branch
+              name: main
+            clonedir: /harness/manifests
+
+        - id: apply_platform
+          name: Apply Platform
+          run:
+            container:
+              image: bitnami/kubectl:latest
+              connector: animesh_dockerhub
+              pull: if-not-exists
+            script: |-
+              set -e
+              IMAGE="${{ inputs.notes_image }}:${{ inputs.notes_tag }}"
+              MODEL="${{ inputs.llm_model }}"
+              sed -e "s|__NOTES_IMAGE__|$IMAGE|g" -e "s|__LLM_MODEL__|$MODEL|g" /harness/manifests/k8s/agent-platform.yaml | kubectl apply -f -
+              kubectl create secret generic llm-key -n agent-ci \
+                --from-literal=LLM_API_KEY="${{ inputs.llm_api_key }}" \
+                --dry-run=client -o yaml | kubectl apply -f -
+              kubectl rollout restart deployment/gateway-llm -n agent-ci
+
+        - id: wait_ready
+          name: Wait For Gateways
+          run:
+            container:
+              image: bitnami/kubectl:latest
+              connector: animesh_dockerhub
+              pull: if-not-exists
+            script: |-
+              set -e
+              kubectl rollout status deployment/gateway-mcp -n agent-ci --timeout=180s
+              kubectl rollout status deployment/gateway-llm -n agent-ci --timeout=180s
+              kubectl get pods -n agent-ci
+
+      rollback:
+        - id: rollback_platform
+          name: Remove Platform
+          run:
+            container:
+              image: bitnami/kubectl:latest
+              connector: animesh_dockerhub
+              pull: if-not-exists
+            script: |-
+              kubectl delete namespace agent-ci --ignore-not-found
+      on-failure:
+        errors: all
+        action: stage-rollback
+      platform:
+        os: linux
+        arch: arm64
+
+    # -----------------------------------------------------------------
+    # Stage 3: the show. Two agents, one front door.
+    #   goose  -> writes a risk note
+    #   kimchi -> reads it, writes a test plan
+    #   audit  -> prints what the gateway saw
+    #   gate   -> reads both notes, passes or fails the release
+    # -----------------------------------------------------------------
+    - id: agents
+      name: Agents Review The Change
+      runtime:
+        kubernetes: {}
+        delegate:
+          - delegate-animesh
+      steps:
+        - id: clone_target
+          name: Clone Target Repo
+          clone:
+            connector: animesh_gh
+            repo: ${{ inputs.target_repo }}
+            ref:
+              type: branch
+              name: main
+            clonedir: /harness/target
+
+        - id: clone_scripts
+          name: Clone Scripts
+          clone:
+            connector: animesh_gh
+            repo: Sonichigo/one-gateway-many-agents
+            ref:
+              type: branch
+              name: main
+            clonedir: /harness/scripts-repo
+
+        - id: goose_review
+          name: Goose Reviews The Diff
+          run:
+            container:
+              image: node:22-bookworm
+              connector: animesh_dockerhub
+              pull: if-not-exists
+            script: |-
+              set -e
+              apt-get update -qq && apt-get install -y -qq libxcb1 libdbus-1-3 bzip2 > /dev/null
+              curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash
+              export PATH="$HOME/.local/bin:$PATH"
+
+              cd /harness/target
+              git diff HEAD~1 | head -c 12000 > /tmp/change.diff
+
+              # Goose talks to the model and the tools through the gateways only.
+              # It speaks OpenAI style. The gateway turns that into a Gemini call
+              # and picks the real model, so the name below does not matter.
+              export GOOSE_PROVIDER=openai
+              export GOOSE_MODEL=any-name
+              export OPENAI_HOST=http://gateway-llm.agent-ci.svc.cluster.local:4000
+              export OPENAI_API_KEY=not-the-real-key
+
+              goose run --no-session -q --max-turns 6 \
+                --with-streamable-http-extension "http://gateway-mcp.agent-ci.svc.cluster.local:3000/mcp" \
+                -t "You review code changes. Read the diff below. Then call the add_note tool one time. Use author goose. The text must start with RISK: low, RISK: medium, or RISK: high, then one short reason in plain words. Diff: $(cat /tmp/change.diff)"
+
+        - id: kimchi_tests
+          name: Kimchi Adds A Test Plan
+          run:
+            container:
+              image: node:22-bookworm
+              connector: animesh_dockerhub
+              pull: if-not-exists
+            script: |-
+              set -e
+              curl -fsSL https://github.com/getkimchi/kimchi/releases/latest/download/install.sh | bash
+              export PATH="$HOME/.local/bin:$HOME/.kimchi/bin:/usr/local/bin:$PATH"
+              export KIMCHI_API_KEY="${{ inputs.kimchi_api_key }}"
+
+              # Kimchi also uses the gateway for its tools.
+              mkdir -p "$HOME/.config/kimchi/harness"
+              printf '%s\n' '{"mcpServers":{"team-tools":{"type":"http","url":"http://gateway-mcp.agent-ci.svc.cluster.local:3000/mcp"}}}' > "$HOME/.config/kimchi/harness/mcp.json"
+
+              kimchi -p "Call the list_notes tool and read what goose wrote. Then call add_note one time. Use author kimchi. The text must be a short test plan with three checks that match the risk goose found."
+
+        - id: audit
+          name: Audit What The Gateway Saw
+          run:
+            container:
+              image: bitnami/kubectl:latest
+              connector: animesh_dockerhub
+              pull: if-not-exists
+            script: |-
+              echo "MCP gateway log (tool calls from both agents):"
+              kubectl logs deployment/gateway-mcp -n agent-ci -c agentgateway --since=15m | grep -iE "mcp|tools" | tail -40
+              echo
+              echo "LLM gateway log (model calls and token counts):"
+              kubectl logs deployment/gateway-llm -n agent-ci --since=15m | grep -iE "gen_ai" | tail -20
+        - id: gate
+          name: Gate The Release
+          run:
+            container:
+              image: node:22-bookworm
+              connector: animesh_dockerhub
+              pull: if-not-exists
+            script: |-
+              set -e
+              bash /harness/scripts-repo/scripts/ci-gate.sh
+
+      on-failure:
+        errors: all
+        action: abort
+      platform:
+        os: linux
+        arch: arm64
+
+    # -----------------------------------------------------------------
+    # Stage 4: always clean up, even when the gate fails.
+    # -----------------------------------------------------------------
+    - id: cleanup
+      name: Cleanup
+      if: always()
+      runtime:
+        kubernetes: {}
+        delegate:
+          - delegate-animesh
+      steps:
+        - id: delete_platform
+          name: Delete Platform
+          run:
+            container:
+              image: bitnami/kubectl:latest
+              connector: animesh_dockerhub
+              pull: if-not-exists
+            script: |-
+              kubectl delete namespace agent-ci --ignore-not-found
+      platform:
+        os: linux
+        arch: arm64
