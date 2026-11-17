@@ -2,19 +2,35 @@
 #
 # Optional second gateway process: an LLM front door.
 #
-# Goose can point its OpenAI provider at http://localhost:4000
-# instead of api.openai.com. The gateway holds the API key,
-# writes an access log for every model call, and can apply
-# rate limits. The agent config never sees the real key.
+# Goose points its OpenAI provider at http://localhost:4000.
+# The gateway holds the real key, changes the model name, and logs every call.
+# When a provider retires a model, you change one line here.
+# Goose and Kimchi do not change.
 #
 # Run it as a second process:
-#   export OPENAI_API_KEY='<your-key>'
+#   export LLM_API_KEY='<your-key>'
 #   agentgateway -f gateway/llm.yaml
 
 llm:
   port: 4000
   models:
     - name: "*"
-      provider: openAI
+      provider: gemini          # Google AI Studio key
       params:
-        apiKey: "$OPENAI_API_KEY"
+        model: gemini-3.5-flash-lite # the gateway sends this, whatever the agent asks for
+        apiKey: "$LLM_API_KEY"
+
+# Other providers: change the provider and params, nothing else.
+#
+# OpenAI:
+#   provider: openAI
+#   params: { model: gpt-4o, apiKey: "$LLM_API_KEY" }
+#
+# Azure OpenAI or Azure AI Foundry:
+#   provider: azure
+#   params:
+#     model: my-deployment-name
+#     azureResourceName: my-resource
+#     azureResourceType: openAI     # or foundry, or aiServices
+#     azureApiVersion: 2024-10-21
+#     apiKey: "$LLM_API_KEY"
