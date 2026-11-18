@@ -1,0 +1,23 @@
+service:
+  name: agent_platform_service
+  identifier: agent_platform_service
+  serviceDefinition:
+    type: Kubernetes
+    spec:
+      manifests:
+        - manifest:
+            identifier: agent_platform_service
+            spec:
+              store:
+                spec:
+                  connectorRef: animesh_gh
+                  repoName: sonichigo/single-gateway
+                  gitFetchType: Branch
+                  branch: main
+                  paths:
+                    - k8s/agent-platform.yaml
+                type: Github
+              optionalValuesYaml: false
+              enableDeclarativeRollback: false
+              skipResourceVersioning: false
+            type: K8sManifest
